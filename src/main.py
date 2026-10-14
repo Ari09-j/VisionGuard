@@ -4,7 +4,6 @@ import sys
 import time
 
 import cv2
-from ultralytics import YOLO
 
 from analyzer import (
     build_report,
@@ -13,6 +12,7 @@ from analyzer import (
     print_report,
     save_report,
 )
+from line_counter import load_model
 from tracker import TrackAnalytics, draw_dashboard
 
 
@@ -34,12 +34,24 @@ def parse_arguments():
     )
     parser.add_argument(
         "--tracker", default="bytetrack.yaml",
-        choices=["bytetrack.yaml", "botsort.yaml", "ocsort.yaml"],
+        choices=["bytetrack.yaml", "botsort.yaml"],
         help="Multi-object tracker."
     )
     parser.add_argument(
         "--line-ratio", type=float, default=0.60,
         help="Counting-line vertical position as a fraction of frame height."
+    )
+    parser.add_argument(
+        "--margin", type=int, default=8,
+        help="Dead-zone (pixels) on each side of the line to suppress jitter."
+    )
+    parser.add_argument(
+        "--min-frames", type=int, default=3,
+        help="Consecutive frames an object must stay past the line to count."
+    )
+    parser.add_argument(
+        "--no-stitch", action="store_true",
+        help="Disable ID stitching (use raw tracker IDs)."
     )
     return parser.parse_args()
 
@@ -81,7 +93,8 @@ def process_image(model, source, output_dir, confidence):
     print(f"\nAnnotated image: {output_image}")
 
 
-def process_video(model, source, output_dir, confidence, tracker_name, line_ratio):
+def process_video(model, model_name, source, output_dir, confidence, tracker_name,
+                  line_ratio, margin=8, min_frames=3, stitch=True):
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {source}")
@@ -95,7 +108,8 @@ def process_video(model, source, output_dir, confidence, tracker_name, line_rati
         raise RuntimeError("Invalid video dimensions.")
 
     line_y = int(height * line_ratio)
-    analytics = TrackAnalytics(line_y)
+    analytics = TrackAnalytics(line_y, margin=margin, min_frames=min_frames,
+                              stitch=stitch)
 
     output_video = output_dir / "tracked_output.mp4"
     writer = cv2.VideoWriter(
@@ -181,7 +195,10 @@ def process_video(model, source, output_dir, confidence, tracker_name, line_rati
     report = {
         "project": "VisionGuard Advanced",
         "source": source,
-        "model": MODEL_NAME,
+        "model": model_name,
+        "line_margin_px": margin,
+        "min_frames_to_confirm": min_frames,
+        "id_stitching": stitch,
         "tracker": tracker_name,
         "frames_processed": frame_no,
         "total_detections": total_detections,
@@ -222,14 +239,15 @@ def main():
     print("=" * 62)
 
     try:
-        model = YOLO(MODEL_NAME)
+        model, model_name = load_model(MODEL_NAME)
 
         if is_image_source(args.source):
             process_image(model, args.source, output_dir, args.confidence)
         elif is_video_source(args.source):
             process_video(
-                model, args.source, output_dir, args.confidence,
-                args.tracker, args.line_ratio
+                model, model_name, args.source, output_dir, args.confidence,
+                args.tracker, args.line_ratio,
+                args.margin, args.min_frames, not args.no_stitch
             )
         else:
             raise ValueError("Advanced analytics currently requires a video file.")

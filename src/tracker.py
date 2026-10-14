@@ -1,14 +1,20 @@
 from collections import Counter, defaultdict
 from pathlib import Path
-import csv
-import math
 
 import cv2
 import pandas as pd
 
+from line_counter import IdStitcher, LineCounter
+
 
 PERSON_CLASS = "person"
 VEHICLE_CLASSES = {"bicycle", "motorcycle", "car", "bus", "truck", "train"}
+
+EVENT_COLUMNS = [
+    "frame", "timestamp_sec", "track_id", "class",
+    "direction", "confidence", "centroid_x", "centroid_y",
+]
+
 
 # COCO-style class names are supplied by the model.
 def object_group(class_name: str) -> str:
@@ -20,17 +26,36 @@ def object_group(class_name: str) -> str:
 
 
 class TrackAnalytics:
-    """Collect frame-level and track-level statistics for a video."""
+    """
+    Collect frame-level and track-level statistics for a video.
 
-    def __init__(self, line_y: int):
+    Own analytics layer on top of Ultralytics tracking:
+      * IdStitcher   - merges fragmented track IDs (same class, nearby, short gap)
+      * LineCounter  - hysteresis + minimum-frames line crossing, direction-aware,
+                       majority-vote class per track
+    """
+
+    def __init__(self, line_y: int, margin: int = 8, min_frames: int = 3,
+                 stitch: bool = True):
         self.line_y = line_y
-        self.previous_centroids = {}
-        self.counted_line_ids = set()
+        self.stitcher = IdStitcher() if stitch else None
+        self.counter = LineCounter(line_y, margin=margin, min_frames=min_frames)
         self.unique_track_ids = set()
-        self.unique_by_class = defaultdict(set)
         self.line_crossings = Counter()
         self.frame_rows = []
-        self.track_events = []
+
+    @property
+    def track_events(self):
+        return self.counter.events
+
+    def _unique_by_voted_class(self):
+        """Unique canonical IDs grouped by each track's majority-vote class."""
+        grouped = defaultdict(set)
+        for tid in self.unique_track_ids:
+            votes = self.counter.class_votes.get(tid)
+            if votes:
+                grouped[votes.most_common(1)[0][0]].add(tid)
+        return grouped
 
     def update(self, frame_no, timestamp, boxes, track_ids, class_names, confidences):
         current_counts = Counter()
@@ -39,52 +64,46 @@ class TrackAnalytics:
         active_ids = set()
         frame_crossings = Counter()
 
-        for box, track_id, cls_name, conf in zip(
+        for box, raw_id, cls_name, conf in zip(
             boxes, track_ids, class_names, confidences
         ):
-            if track_id is None:
+            if raw_id is None:
                 continue
-
-            track_id = int(track_id)
-            active_ids.add(track_id)
-            self.unique_track_ids.add(track_id)
-            self.unique_by_class[cls_name].add(track_id)
-            current_counts[cls_name] += 1
-
-            if object_group(cls_name) == "person":
-                current_persons += 1
-            elif object_group(cls_name) == "vehicle":
-                current_vehicles += 1
 
             x1, y1, x2, y2 = [int(v) for v in box]
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
 
-            previous = self.previous_centroids.get(track_id)
-            if previous is not None and track_id not in self.counted_line_ids:
-                prev_y = previous[1]
-                crossed = (prev_y < self.line_y <= cy) or (
-                    prev_y > self.line_y >= cy
-                )
-                if crossed:
-                    direction = "IN" if cy > prev_y else "OUT"
-                    self.counted_line_ids.add(track_id)
-                    self.line_crossings[cls_name] += 1
-                    frame_crossings[cls_name] += 1
-                    self.track_events.append(
-                        {
-                            "frame": frame_no,
-                            "timestamp_sec": round(timestamp, 3),
-                            "track_id": track_id,
-                            "class": cls_name,
-                            "direction": direction,
-                            "confidence": round(float(conf), 4),
-                            "centroid_x": cx,
-                            "centroid_y": cy,
-                        }
-                    )
+            raw_id = int(raw_id)
+            if self.stitcher:
+                track_id = self.stitcher.resolve(frame_no, raw_id, cls_name, cx, cy)
+            else:
+                track_id = raw_id
 
-            self.previous_centroids[track_id] = (cx, cy)
+            active_ids.add(track_id)
+            self.unique_track_ids.add(track_id)
+            current_counts[cls_name] += 1
+
+            group = object_group(cls_name)
+            if group == "person":
+                current_persons += 1
+            elif group == "vehicle":
+                current_vehicles += 1
+
+            event = self.counter.update(
+                frame_no, timestamp, track_id, cls_name, conf, cx, cy
+            )
+            if event is not None:
+                self.line_crossings[event["class"]] += 1
+                frame_crossings[event["class"]] += 1
+
+        # FIX: the original expression put the `if confidences` check inside
+        # round()'s second argument, so frames with no detections raised
+        # ZeroDivisionError.
+        avg_conf = (
+            round(sum(float(c) for c in confidences) / len(confidences), 4)
+            if confidences else 0.0
+        )
 
         row = {
             "frame": frame_no,
@@ -93,10 +112,7 @@ class TrackAnalytics:
             "persons_visible": current_persons,
             "vehicles_visible": current_vehicles,
             "total_objects_visible": sum(current_counts.values()),
-            "average_confidence": round(
-                sum(float(c) for c in confidences) / len(confidences), 4
-                if confidences else 0.0
-            ),
+            "average_confidence": avg_conf,
             "line_crossings_this_frame": sum(frame_crossings.values()),
         }
 
@@ -114,18 +130,18 @@ class TrackAnalytics:
         summary_csv = output_dir / "summary.csv"
 
         pd.DataFrame(self.frame_rows).to_csv(frame_csv, index=False)
-        pd.DataFrame(
-            self.track_events,
-            columns=[
-                "frame", "timestamp_sec", "track_id", "class",
-                "direction", "confidence", "centroid_x", "centroid_y"
-            ],
-        ).to_csv(event_csv, index=False)
+        pd.DataFrame(self.track_events, columns=EVENT_COLUMNS).to_csv(
+            event_csv, index=False
+        )
 
-        total_person_tracks = len(self.unique_by_class.get("person", set()))
+        unique_by_class = self._unique_by_voted_class()
+        total_person_tracks = len(unique_by_class.get("person", set()))
         total_vehicle_tracks = sum(
-            len(self.unique_by_class.get(cls, set()))
-            for cls in VEHICLE_CLASSES
+            len(unique_by_class.get(cls, set())) for cls in VEHICLE_CLASSES
+        )
+        merged_ids = (
+            sum(1 for r, c in self.stitcher.raw_to_canon.items() if r != c)
+            if self.stitcher else 0
         )
 
         summary = {
@@ -137,12 +153,11 @@ class TrackAnalytics:
             "vehicle_line_crossings": sum(
                 self.line_crossings.get(cls, 0) for cls in VEHICLE_CLASSES
             ),
+            "ids_merged_by_stitcher": merged_ids,
         }
 
         for cls in sorted(VEHICLE_CLASSES | {PERSON_CLASS}):
-            summary[f"unique_{cls}_tracks"] = len(
-                self.unique_by_class.get(cls, set())
-            )
+            summary[f"unique_{cls}_tracks"] = len(unique_by_class.get(cls, set()))
             summary[f"{cls}_line_crossings"] = self.line_crossings.get(cls, 0)
 
         pd.DataFrame([summary]).to_csv(summary_csv, index=False)
