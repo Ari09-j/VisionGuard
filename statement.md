@@ -1,7 +1,7 @@
 # Statement
 
-**Name:** [YOUR NAME]
-**Roll No. / ID:** [YOUR ID]
+**Name:** Arinjay Jain
+**Roll No. / ID:** 24BAI10132
 **Project:** VisionGuard – Object Detection, Tracking and Counting
 **Repository:** https://github.com/Ari09-j/VisionGuard
 
@@ -30,10 +30,10 @@ I declare that this project is my own work, except for the third-party libraries
 Detection and base tracking come from Ultralytics. My contribution is the analytics, counting logic, ID stitching, export and evaluation built on top of them.
 
 ## 4. Use of AI tools
-[WRITE THIS HONESTLY. Example: "I used an AI assistant to help review my code, suggest improvements to the line-crossing logic, and draft documentation. I tested and verified the final code myself."]
+ "I used an AI assistant to help review my code, suggest improvements to the line-crossing logic, and draft documentation. I tested and verified the final code myself.
 
 ## 5. Data
-Test video: [NAME / SOURCE / LICENCE OF YOUR VIDEO]. Ground-truth counts were obtained by manually counting crossings in the clip.
+ Ground-truth counts were obtained by manually counting crossings in the clip.
 
 ## 6. Known limitations
 - ID switches can still occur under heavy occlusion.
