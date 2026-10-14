@@ -16,7 +16,7 @@ Every detected object can receive a persistent track ID across frames. The proje
 
 - ByteTrack
 - BoT-SORT
-- OC-SORT
+  
 
 Ultralytics documents these as supported multi-object trackers for YOLO tracking.
 
